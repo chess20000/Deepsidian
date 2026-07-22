@@ -1,26 +1,13 @@
-# deepsidian
+# Deepsidian
 
-deepsidian 是一个不依赖 Node.js、Python、本地服务或第三方运行库的 Obsidian AI Agent 插件。插件使用 Obsidian 自带 API，在桌面端和移动端运行。
+Deepsidian 是一个不依赖 Node.js、Python、本地服务或第三方运行库的 Obsidian AI Agent 插件。插件使用 Obsidian 自带 API，可以在桌面端和移动端运行。
 
 ## 当前功能
 
 - DeepSeek BYOK，默认使用 `deepseek-v4-flash`
 - OpenAI Chat Completions 兼容接口
 - 聊天记录以 Markdown 保存在 Vault 内
-- CooDB 风格的工作台、历史对话侧栏和悬浮输入卡
-- 使用 Obsidian 原生 Markdown 渲染聊天消息
-- Enter 发送，Shift + Enter 换行；输入框会随内容自动增高
-- 可切换 DeepSeek 思考模式，并展开查看思考过程和工具执行摘要
-- CooDB 风格上下文槽；读取接口返回的实际 usage，默认上限 1,048,576，可自行修改
-- iOS/iPadOS 软键盘弹出时，输入区自动贴合键盘上沿
-- 移动端提供悬浮球，并在 Obsidian 主工作区以全屏标签打开聊天
 - API Key 可使用 Web Crypto 加密后保存在 Vault，供不同设备解锁
-- 列出、搜索和读取笔记
-- 创建、覆盖、局部替换和追加文件
-- 移动、重命名及移入废纸篓
-- 更新 Markdown Properties/frontmatter
-- 普通写入可预览确认；移动和删除始终确认
-- 可限制 Agent 只能访问某个 Vault 子目录
 - 无遥测，无内置服务端，无第三方运行依赖
 
 ## 安装
