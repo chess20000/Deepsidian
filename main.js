@@ -155,6 +155,10 @@ function errorMessage(error) {
   return String(error);
 }
 
+function isConnectionError(error) {
+  return errorMessage(error).startsWith("无法连接模型服务：");
+}
+
 function quoteYaml(value) {
   return JSON.stringify(String(value));
 }
@@ -815,6 +819,9 @@ class AgentClient {
       }
     }
 
+    if (response.status === 0) {
+      throw new Error("无法连接模型服务：请求未得到响应");
+    }
     if (response.status < 200 || response.status >= 300) {
       const detail = data?.error?.message || truncate(response.text || "未知错误", 1000);
       throw new Error(`模型服务返回 ${response.status}：${detail}`);
@@ -850,6 +857,8 @@ class VaultAgentView extends ItemView {
       phase: "next",
     };
     this.statusEl = null;
+    this.statusDotEl = null;
+    this.statusState = "idle";
     this.sessionTitleEl = null;
     this.composerEl = null;
     this.toolActivityEl = null;
@@ -912,11 +921,12 @@ class VaultAgentView extends ItemView {
     const titleGroup = header.createDiv({ cls: "vault-agent-title-group" });
     this.sessionTitleEl = titleGroup.createDiv({ text: "新对话", cls: "vault-agent-session-title" });
     const statusLine = titleGroup.createDiv({ cls: "vault-agent-status-line" });
-    statusLine.createSpan({ cls: "vault-agent-status-dot" });
+    this.statusDotEl = statusLine.createSpan({ cls: "vault-agent-status-dot" });
     this.statusEl = statusLine.createSpan({
       text: this.plugin.settings.model,
       cls: "vault-agent-status vault-agent-muted",
     });
+    this.setStatusState("idle");
 
     this.messagesEl = main.createDiv({ cls: "vault-agent-messages" });
     this.renderWelcome();
@@ -1279,6 +1289,25 @@ class VaultAgentView extends ItemView {
     }, 0);
   }
 
+  setStatusState(state) {
+    this.statusState = ["idle", "generating", "offline"].includes(state)
+      ? state
+      : "idle";
+    this.statusDotEl?.toggleClass("is-generating", this.statusState === "generating");
+    this.statusDotEl?.toggleClass("is-offline", this.statusState === "offline");
+    this.statusDotEl?.setAttribute(
+      "aria-label",
+      this.statusState === "generating"
+        ? "生成中"
+        : this.statusState === "offline"
+          ? "无法连接模型服务"
+          : "就绪",
+    );
+    this.statusEl?.setText(
+      this.statusState === "generating" ? "GEN" : this.plugin.settings.model,
+    );
+  }
+
   setBusy(busy) {
     this.busy = busy;
     if (this.inputEl) this.inputEl.disabled = false;
@@ -1287,9 +1316,8 @@ class VaultAgentView extends ItemView {
       this.sendButton.toggleClass("is-busy", busy);
       setIcon(this.sendButton, busy ? "loader-circle" : "arrow-up");
     }
-    if (this.statusEl) {
-      this.statusEl.setText(busy ? "Agent 正在工作" : this.plugin.settings.model);
-    }
+    if (busy) this.setStatusState("generating");
+    else if (this.statusState !== "offline") this.setStatusState("idle");
     this.renderContextUsage(
       this.contextUsage.tokens,
       this.plugin.settings.contextLimit,
@@ -1335,8 +1363,6 @@ class VaultAgentView extends ItemView {
           this.renderToolActivity(`正在执行：${name}`);
         } else if (event.type === "tool-end") {
           await this.logManager.appendTool(name, event.args, event.result);
-        } else if (event.type === "reasoning") {
-          this.statusEl?.setText("Agent 正在思考");
         } else if (event.type === "context-usage") {
           this.renderContextUsage(event.tokens, event.limit, event.phase);
         }
@@ -1357,6 +1383,7 @@ class VaultAgentView extends ItemView {
       await this.refreshHistorySidebar();
     } catch (error) {
       const message = `发生错误：${errorMessage(error)}`;
+      if (isConnectionError(error)) this.setStatusState("offline");
       this.clearToolActivity();
       if (liveContent && !runFinished) {
         this.history.push({ role: "assistant", content: liveContent });

@@ -313,6 +313,17 @@
   border-radius: 50%;
   background: #62c58b;
   box-shadow: 0 0 0 3px rgba(98, 197, 139, 0.12);
+  transition: background-color 160ms ease, box-shadow 160ms ease;
+}
+
+.vault-agent-status-dot.is-generating {
+  background: #5b8def;
+  box-shadow: 0 0 0 3px rgba(91, 141, 239, 0.14);
+}
+
+.vault-agent-status-dot.is-offline {
+  background: #e35d6a;
+  box-shadow: 0 0 0 3px rgba(227, 93, 106, 0.14);
 }
 
 .vault-agent-status {
