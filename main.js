@@ -1713,6 +1713,7 @@ class VaultAgentSettingTab extends PluginSettingTab {
 module.exports = class VaultAgentPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
+    this.mobileReturnLeaf = null;
     this.toolRegistry = new ToolRegistry(this);
     this.agentClient = new AgentClient(this);
     this.registerBuiltinTools();
@@ -1745,6 +1746,7 @@ module.exports = class VaultAgentPlugin extends Plugin {
   onunload() {
     this.mobileFab?.remove();
     this.mobileFab = null;
+    this.mobileReturnLeaf = null;
   }
 
   async loadSettings() {
@@ -1865,9 +1867,43 @@ module.exports = class VaultAgentPlugin extends Plugin {
     this.app.setting.openTabById(this.manifest.id);
   }
 
+  getActiveWorkspaceLeaf() {
+    const activeView = this.app.workspace.getActiveViewOfType?.(VaultAgentView);
+    if (activeView?.leaf) return activeView.leaf;
+    return this.app.workspace.getMostRecentLeaf?.() || this.app.workspace.activeLeaf || null;
+  }
+
+  isDeepsidianLeaf(leaf) {
+    return leaf?.view?.getViewType?.() === VIEW_TYPE;
+  }
+
+  async toggleMobileView() {
+    const activeLeaf = this.getActiveWorkspaceLeaf();
+    if (!this.isDeepsidianLeaf(activeLeaf)) {
+      await this.activateView();
+      return;
+    }
+
+    const returnLeaf = this.mobileReturnLeaf;
+    this.mobileReturnLeaf = null;
+    this.app.workspace.detachLeavesOfType(VIEW_TYPE);
+    if (returnLeaf && returnLeaf !== activeLeaf) {
+      try {
+        await this.app.workspace.revealLeaf(returnLeaf);
+      } catch (_error) {
+        // Obsidian will reveal the remaining mobile leaf when the saved leaf no longer exists.
+      }
+    }
+    this.updateMobileFabVisibility();
+  }
+
   async activateView() {
     let leaf;
     if (Platform.isMobileApp) {
+      const activeLeaf = this.getActiveWorkspaceLeaf();
+      if (activeLeaf && !this.isDeepsidianLeaf(activeLeaf)) {
+        this.mobileReturnLeaf = activeLeaf;
+      }
       this.app.workspace.detachLeavesOfType(VIEW_TYPE);
       leaf = this.app.workspace.getLeaf("tab");
       await leaf.setViewState({ type: VIEW_TYPE, active: true });
@@ -1892,7 +1928,7 @@ module.exports = class VaultAgentPlugin extends Plugin {
     button.setAttribute("aria-label", "打开 deepsidian");
     button.setAttribute("title", "打开 deepsidian");
     setIcon(button, "bot");
-    button.addEventListener("click", () => this.activateView());
+    button.addEventListener("click", () => this.toggleMobileView());
     doc.body.appendChild(button);
     this.mobileFab = button;
     if (typeof this.register === "function") this.register(() => button.remove());
@@ -1901,6 +1937,10 @@ module.exports = class VaultAgentPlugin extends Plugin {
 
   updateMobileFabVisibility() {
     if (!this.mobileFab) return;
+    const active = this.isDeepsidianLeaf(this.getActiveWorkspaceLeaf());
+    const label = active ? "关闭 deepsidian 并返回" : "打开 deepsidian";
+    this.mobileFab.setAttribute("aria-label", label);
+    this.mobileFab.setAttribute("title", label);
     this.mobileFab.removeClass?.("is-hidden");
     this.mobileFab.classList?.remove("is-hidden");
   }
