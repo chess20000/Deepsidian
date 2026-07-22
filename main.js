@@ -528,6 +528,8 @@ class ChatLogManager {
     const visibleContent = role === "assistant"
       ? stripThinkBlocks(content)
       : String(content ?? "");
+    const intermediateContent = stripThinkBlocks(meta.intermediateContent).trim();
+    const reasoning = String(meta.reasoning ?? "").trim();
     const blockParts = [
       "",
       `## ${label} · ${displayTime()}`,
@@ -535,15 +537,29 @@ class ChatLogManager {
       visibleContent,
       "",
     ];
-    if (role === "assistant" && meta.reasoning) {
+    if (role === "assistant" && (intermediateContent || reasoning)) {
       blockParts.push(
         "<!-- deepsidian-internal:reasoning:start -->",
-        "<details><summary>思考过程</summary>",
+        "<details><summary>执行过程</summary>",
         "",
-        ...String(meta.reasoning)
-          .split("\n")
-          .map((line) => `> ${line}`),
-        "",
+      );
+      if (intermediateContent) {
+        blockParts.push(
+          "**阶段性回复**",
+          "",
+          ...intermediateContent.split("\n").map((line) => `> ${line}`),
+          "",
+        );
+      }
+      if (reasoning) {
+        blockParts.push(
+          "**思考过程**",
+          "",
+          ...reasoning.split("\n").map((line) => `> ${line}`),
+          "",
+        );
+      }
+      blockParts.push(
         "</details>",
         "<!-- deepsidian-internal:reasoning:end -->",
         "",
@@ -659,7 +675,7 @@ class AgentClient {
   async run(history, onEvent) {
     const startedAt = Date.now();
     const reasoningParts = [];
-    const answerParts = [];
+    const intermediateParts = [];
     let toolCount = 0;
     const recentHistory = history.slice(-24).map((message) => ({
       role: message.role,
@@ -695,25 +711,25 @@ class AgentClient {
       }
 
       const answerPart = stripThinkBlocks(assistant.content).trim();
-      if (answerPart) {
-        answerParts.push(answerPart);
-        if (onEvent) {
-          await onEvent({
-            type: "assistant-content",
-            text: answerParts.join("\n\n"),
-          });
-        }
-      }
-
       if (toolCalls.length === 0) {
-        const finalText = answerParts.join("\n\n");
         return {
-          content: finalText || "模型没有返回文字内容。",
+          content: answerPart || "模型没有返回文字内容。",
+          intermediateContent: intermediateParts.join("\n\n"),
           reasoning: reasoningParts.join("\n\n"),
           toolCount,
           durationMs: Date.now() - startedAt,
           contextTokens,
         };
+      }
+
+      if (answerPart) {
+        intermediateParts.push(answerPart);
+        if (onEvent) {
+          await onEvent({
+            type: "assistant-content",
+            text: intermediateParts.join("\n\n"),
+          });
+        }
       }
 
       const assistantMessage = {
@@ -1146,6 +1162,16 @@ class VaultAgentView extends ItemView {
   }
 
   renderTrace(wrapper, meta) {
+    const intermediateContent = stripThinkBlocks(meta.intermediateContent).trim();
+    const reasoning = String(meta.reasoning ?? "").trim();
+    const detailSections = [];
+    if (intermediateContent) {
+      detailSections.push(`阶段性回复\n${intermediateContent}`);
+    }
+    if (reasoning) {
+      detailSections.push(`思考过程\n${reasoning}`);
+    }
+    const detailText = detailSections.join("\n\n");
     const trace = wrapper.createDiv({ cls: "vault-agent-execution-trace" });
     const summary = trace.createEl("button", {
       cls: "vault-agent-trace-summary",
@@ -1153,17 +1179,17 @@ class VaultAgentView extends ItemView {
     });
     const chevron = summary.createSpan({ cls: "vault-agent-trace-chevron" });
     setIcon(chevron, "chevron-right");
-    summary.createSpan({ text: meta.reasoning ? "已思考" : "已处理" });
+    summary.createSpan({ text: detailText ? "执行过程" : "已处理" });
     if (meta.toolCount) summary.createSpan({ text: `${meta.toolCount} 个工具`, cls: "vault-agent-trace-meta" });
     if (meta.durationMs != null) {
       summary.createSpan({ text: `${(meta.durationMs / 1000).toFixed(1)}s`, cls: "vault-agent-trace-meta" });
     }
-    if (!meta.reasoning) {
+    if (!detailText) {
       summary.disabled = true;
       return trace;
     }
     const details = trace.createDiv({
-      text: meta.reasoning,
+      text: detailText,
       cls: "vault-agent-trace-details",
     });
     details.hidden = true;
