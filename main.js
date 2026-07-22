@@ -24,6 +24,8 @@ const SYNCED_KEY_FORMAT = "deepsidian-secret-v1";
 const PBKDF2_ITERATIONS = 310000;
 const MAX_WRITE_CHARS = 200000;
 const MAX_TOOL_OUTPUT_CHARS = 50000;
+const INTERNAL_LOG_BLOCK_PATTERN =
+  /<!-- deepsidian-internal:(reasoning|tool):start -->[\s\S]*?<!-- deepsidian-internal:\1:end -->/gi;
 
 const DEFAULT_SETTINGS = {
   baseUrl: "https://api.deepseek.com",
@@ -88,6 +90,47 @@ function truncate(value, limit) {
   const text = String(value ?? "");
   if (text.length <= limit) return text;
   return `${text.slice(0, limit)}\n…（已截断 ${text.length - limit} 个字符）`;
+}
+
+function stripThinkBlocks(value) {
+  const text = String(value ?? "");
+  const tags = /<think\b[^>]*>|<\/think\s*>/gi;
+  const openings = [];
+  const ranges = [];
+  let match;
+
+  while ((match = tags.exec(text)) !== null) {
+    if (!/^<\//.test(match[0])) {
+      openings.push(match.index);
+      continue;
+    }
+    if (openings.length === 0) continue;
+    ranges.push([openings.pop(), tags.lastIndex]);
+  }
+
+  if (ranges.length === 0) return text;
+  ranges.sort((left, right) => left[0] - right[0]);
+  const merged = [];
+  for (const range of ranges) {
+    const previous = merged[merged.length - 1];
+    if (previous && range[0] <= previous[1]) {
+      previous[1] = Math.max(previous[1], range[1]);
+    } else {
+      merged.push([...range]);
+    }
+  }
+
+  let visible = "";
+  let cursor = 0;
+  for (const [start, end] of merged) {
+    visible += text.slice(cursor, start);
+    cursor = end;
+  }
+  return visible + text.slice(cursor);
+}
+
+function stripInternalLogBlocks(value) {
+  return String(value ?? "").replace(INTERNAL_LOG_BLOCK_PATTERN, "");
 }
 
 function formatTokenKilounits(value) {
@@ -482,15 +525,19 @@ class ChatLogManager {
 
   appendMessage(role, content, meta = {}) {
     const label = role === "user" ? "用户" : "Agent";
+    const visibleContent = role === "assistant"
+      ? stripThinkBlocks(content)
+      : String(content ?? "");
     const blockParts = [
       "",
       `## ${label} · ${displayTime()}`,
       "",
-      String(content || ""),
+      visibleContent,
       "",
     ];
     if (role === "assistant" && meta.reasoning) {
       blockParts.push(
+        "<!-- deepsidian-internal:reasoning:start -->",
         "<details><summary>思考过程</summary>",
         "",
         ...String(meta.reasoning)
@@ -498,6 +545,7 @@ class ChatLogManager {
           .map((line) => `> ${line}`),
         "",
         "</details>",
+        "<!-- deepsidian-internal:reasoning:end -->",
         "",
       );
     }
@@ -505,15 +553,17 @@ class ChatLogManager {
   }
 
   parseMessages(content) {
-    const cleaned = String(content || "").replace(/<details>[\s\S]*?<\/details>/gi, "");
+    const cleaned = stripInternalLogBlocks(content);
     const heading = /^## (用户|Agent) ·[^\n]*$/gm;
     const matches = Array.from(cleaned.matchAll(heading));
     return matches.map((match, index) => {
       const start = match.index + match[0].length;
       const end = index + 1 < matches.length ? matches[index + 1].index : cleaned.length;
+      const role = match[1] === "用户" ? "user" : "assistant";
+      const messageContent = cleaned.slice(start, end).trim();
       return {
-        role: match[1] === "用户" ? "user" : "assistant",
-        content: cleaned.slice(start, end).trim(),
+        role,
+        content: role === "assistant" ? stripThinkBlocks(messageContent) : messageContent,
       };
     });
   }
@@ -562,6 +612,7 @@ class ChatLogManager {
     }
     const block = [
       "",
+      "<!-- deepsidian-internal:tool:start -->",
       `<details><summary>工具：${name} · ${displayTime()}</summary>`,
       "",
       "```json",
@@ -569,6 +620,7 @@ class ChatLogManager {
       "```",
       "",
       "</details>",
+      "<!-- deepsidian-internal:tool:end -->",
       "",
     ].join("\n");
     return this.enqueueAppend(block);
@@ -607,6 +659,7 @@ class AgentClient {
   async run(history, onEvent) {
     const startedAt = Date.now();
     const reasoningParts = [];
+    const answerParts = [];
     let toolCount = 0;
     const recentHistory = history.slice(-24).map((message) => ({
       role: message.role,
@@ -641,8 +694,19 @@ class AgentClient {
         if (onEvent) await onEvent({ type: "reasoning", text: reasoning });
       }
 
+      const answerPart = stripThinkBlocks(assistant.content).trim();
+      if (answerPart) {
+        answerParts.push(answerPart);
+        if (onEvent) {
+          await onEvent({
+            type: "assistant-content",
+            text: answerParts.join("\n\n"),
+          });
+        }
+      }
+
       if (toolCalls.length === 0) {
-        const finalText = String(assistant.content || "").trim();
+        const finalText = answerParts.join("\n\n");
         return {
           content: finalText || "模型没有返回文字内容。",
           reasoning: reasoningParts.join("\n\n"),
@@ -1056,7 +1120,15 @@ class VaultAgentView extends ItemView {
     const body = wrapper.createDiv({
       cls: "vault-agent-message-body markdown-rendered",
     });
-    const markdown = String(content || "");
+    await this.renderMessageBody(body, role, content);
+    this.scrollToBottom();
+    return { wrapper, body };
+  }
+
+  async renderMessageBody(body, role, content) {
+    const markdown = role === "assistant"
+      ? stripThinkBlocks(content)
+      : String(content ?? "");
     const sourcePath = this.app.workspace.getActiveFile()?.path || "";
     try {
       await MarkdownRenderer.render(this.app, markdown, body, sourcePath, this);
@@ -1064,6 +1136,12 @@ class VaultAgentView extends ItemView {
       body.empty();
       body.setText(markdown);
     }
+  }
+
+  async updateRenderedMessage(rendered, role, content) {
+    if (!rendered?.body) return;
+    rendered.body.empty();
+    await this.renderMessageBody(rendered.body, role, content);
     this.scrollToBottom();
   }
 
@@ -1082,7 +1160,7 @@ class VaultAgentView extends ItemView {
     }
     if (!meta.reasoning) {
       summary.disabled = true;
-      return;
+      return trace;
     }
     const details = trace.createDiv({
       text: meta.reasoning,
@@ -1095,6 +1173,7 @@ class VaultAgentView extends ItemView {
       trace.toggleClass("is-open", !details.hidden);
       setIcon(chevron, details.hidden ? "chevron-right" : "chevron-down");
     });
+    return trace;
   }
 
   renderToolActivity(text) {
@@ -1196,11 +1275,21 @@ class VaultAgentView extends ItemView {
     await this.renderMessage("user", content);
     this.setBusy(true);
 
+    let liveContent = "";
+    let liveMessage = null;
+    let runFinished = false;
     try {
       await this.logManager.appendMessage("user", content);
       const answer = await this.plugin.agentClient.run(this.history, async (event) => {
         const name = event.call?.function?.name || "unknown";
-        if (event.type === "tool-start") {
+        if (event.type === "assistant-content") {
+          liveContent = event.text;
+          if (liveMessage) {
+            await this.updateRenderedMessage(liveMessage, "assistant", liveContent);
+          } else {
+            liveMessage = await this.renderMessage("assistant", liveContent);
+          }
+        } else if (event.type === "tool-start") {
           this.renderToolActivity(`正在执行：${name}`);
         } else if (event.type === "tool-end") {
           await this.logManager.appendTool(name, event.args, event.result);
@@ -1210,14 +1299,27 @@ class VaultAgentView extends ItemView {
           this.renderContextUsage(event.tokens, event.limit, event.phase);
         }
       });
+      runFinished = true;
       this.history.push({ role: "assistant", content: answer.content });
       this.clearToolActivity();
-      await this.renderMessage("assistant", answer.content, answer);
+      if (liveMessage) {
+        await this.updateRenderedMessage(liveMessage, "assistant", answer.content);
+        if (answer.reasoning || answer.toolCount || answer.durationMs != null) {
+          const trace = this.renderTrace(liveMessage.wrapper, answer);
+          liveMessage.wrapper.insertBefore(trace, liveMessage.body);
+        }
+      } else {
+        await this.renderMessage("assistant", answer.content, answer);
+      }
       await this.logManager.appendMessage("assistant", answer.content, answer);
       await this.refreshHistorySidebar();
     } catch (error) {
       const message = `发生错误：${errorMessage(error)}`;
       this.clearToolActivity();
+      if (liveContent && !runFinished) {
+        this.history.push({ role: "assistant", content: liveContent });
+        await this.logManager.appendMessage("assistant", liveContent).catch(() => undefined);
+      }
       await this.renderMessage("assistant", message);
       await this.logManager.appendMessage("assistant", message).catch(() => undefined);
       await this.refreshHistorySidebar();
