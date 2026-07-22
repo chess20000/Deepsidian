@@ -955,7 +955,7 @@ class VaultAgentView extends ItemView {
       attr: { type: "button", "aria-label": "切换思考模式" },
     });
     const thinkingIcon = this.thinkingButton.createSpan({ cls: "vault-agent-thinking-icon" });
-    setIcon(thinkingIcon, "brain");
+    setIcon(thinkingIcon, "atom");
     this.thinkingLabel = this.thinkingButton.createSpan({ text: "思考" });
     this.thinkingButton.addEventListener("click", async () => {
       this.plugin.settings.thinkingEnabled = !this.plugin.settings.thinkingEnabled;
@@ -1166,12 +1166,20 @@ class VaultAgentView extends ItemView {
     const reasoning = String(meta.reasoning ?? "").trim();
     const detailSections = [];
     if (intermediateContent) {
-      detailSections.push(`阶段性回复\n${intermediateContent}`);
+      detailSections.push({
+        icon: "message-square",
+        label: "阶段性回复",
+        content: intermediateContent,
+      });
     }
     if (reasoning) {
-      detailSections.push(`思考过程\n${reasoning}`);
+      detailSections.push({
+        icon: "atom",
+        label: "思考过程",
+        content: reasoning,
+      });
     }
-    const detailText = detailSections.join("\n\n");
+    const hasDetails = detailSections.length > 0;
     const trace = wrapper.createDiv({ cls: "vault-agent-execution-trace" });
     const summary = trace.createEl("button", {
       cls: "vault-agent-trace-summary",
@@ -1179,19 +1187,27 @@ class VaultAgentView extends ItemView {
     });
     const chevron = summary.createSpan({ cls: "vault-agent-trace-chevron" });
     setIcon(chevron, "chevron-right");
-    summary.createSpan({ text: detailText ? "执行过程" : "已处理" });
+    summary.createSpan({ text: hasDetails ? "执行过程" : "已处理" });
     if (meta.toolCount) summary.createSpan({ text: `${meta.toolCount} 个工具`, cls: "vault-agent-trace-meta" });
     if (meta.durationMs != null) {
       summary.createSpan({ text: `${(meta.durationMs / 1000).toFixed(1)}s`, cls: "vault-agent-trace-meta" });
     }
-    if (!detailText) {
+    if (!hasDetails) {
       summary.disabled = true;
       return trace;
     }
-    const details = trace.createDiv({
-      text: detailText,
-      cls: "vault-agent-trace-details",
-    });
+    const details = trace.createDiv({ cls: "vault-agent-trace-details" });
+    for (const section of detailSections) {
+      const sectionEl = details.createDiv({ cls: "vault-agent-trace-section" });
+      const marker = sectionEl.createDiv({ cls: "vault-agent-trace-section-marker" });
+      marker.setAttribute("aria-label", section.label);
+      marker.setAttribute("title", section.label);
+      setIcon(marker, section.icon);
+      sectionEl.createDiv({
+        text: section.content,
+        cls: "vault-agent-trace-section-content",
+      });
+    }
     details.hidden = true;
     summary.addEventListener("click", () => {
       details.hidden = !details.hidden;

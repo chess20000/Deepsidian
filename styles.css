@@ -482,7 +482,37 @@
   color: var(--text-muted);
   font-family: var(--font-text);
   line-height: 1.55;
+}
+
+.vault-agent-trace-section {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+}
+
+.vault-agent-trace-section + .vault-agent-trace-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.vault-agent-trace-section-marker {
+  display: grid;
+  place-items: center;
+  padding-top: 3px;
+  color: var(--vault-agent-accent);
+}
+
+.vault-agent-trace-section-marker svg {
+  width: 15px;
+  height: 15px;
+  stroke-width: 1.8;
+}
+
+.vault-agent-trace-section-content {
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .vault-agent-tool-activity {
