@@ -1983,7 +1983,11 @@ module.exports = class VaultAgentPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
     this.systemPromptWriteQueue = Promise.resolve();
-    await this.initializeSystemPrompt();
+    this.systemPromptInitialization = null;
+    const legacyPrompt = typeof this.settings.systemPrompt === "string"
+      ? this.settings.systemPrompt.trim()
+      : "";
+    this.systemPromptTemplate = buildSystemPromptTemplate(legacyPrompt);
     this.mobileReturnLeaf = null;
     this.lastSessionPath = this.settings.lastSessionPath || undefined;
     this.toolRegistry = new ToolRegistry(this);
@@ -2045,17 +2049,56 @@ module.exports = class VaultAgentPlugin extends Plugin {
     await this.saveData({ settings: this.settings });
   }
 
+  ensureSystemPromptReady() {
+    if (!this.systemPromptInitialization) {
+      const attempt = this.initializeSystemPrompt();
+      this.systemPromptInitialization = attempt.catch((error) => {
+        if (this.systemPromptInitialization) this.systemPromptInitialization = null;
+        throw error;
+      });
+    }
+    return this.systemPromptInitialization;
+  }
+
+  async systemPromptFileState(path) {
+    const indexed = this.app.vault.getAbstractFileByPath(path);
+    if (indexed instanceof TFile) return { type: "file", file: indexed };
+    if (indexed instanceof TFolder) return { type: "folder", file: indexed };
+    if (indexed) return { type: "other", file: indexed };
+
+    let stat = null;
+    try {
+      stat = await this.app.vault.adapter?.stat?.(path);
+    } catch (_error) {
+      // A missing path may be reported as either null or an error by the adapter.
+    }
+    if (stat?.type === "file") return { type: "file", file: null };
+    if (stat?.type === "folder") return { type: "folder", file: null };
+    return { type: "missing", file: null };
+  }
+
+  async readSystemPromptFile(path) {
+    const state = await this.systemPromptFileState(path);
+    if (state.type === "file") {
+      if (state.file) return this.app.vault.cachedRead(state.file);
+      if (typeof this.app.vault.adapter?.read === "function") {
+        return this.app.vault.adapter.read(path);
+      }
+      throw new Error(`暂时无法读取系统提示词：${path}`);
+    }
+    if (state.type !== "missing") throw new Error(`${path} 已存在且不是文件`);
+    return null;
+  }
+
   async initializeSystemPrompt() {
     const hadLegacyPrompt = Object.prototype.hasOwnProperty.call(this.settings, "systemPrompt");
     const legacyPrompt = typeof this.settings.systemPrompt === "string"
       ? this.settings.systemPrompt.trim()
       : "";
     const path = this.normalizeSystemPath(SYSTEM_PROMPT_PATH, false);
-    const existing = this.app.vault.getAbstractFileByPath(path);
-    if (existing instanceof TFile) {
-      this.systemPromptTemplate = await this.app.vault.cachedRead(existing);
-    } else if (existing) {
-      throw new Error(`${path} 已存在且不是文件`);
+    const existingContent = await this.readSystemPromptFile(path);
+    if (existingContent != null) {
+      this.systemPromptTemplate = existingContent;
     } else {
       await this.writeSystemPrompt(buildSystemPromptTemplate(legacyPrompt));
     }
@@ -2066,14 +2109,23 @@ module.exports = class VaultAgentPlugin extends Plugin {
   }
 
   async readSystemPrompt() {
+    try {
+      await this.ensureSystemPromptReady();
+    } catch (_error) {
+      return this.systemPromptTemplate || DEFAULT_SYSTEM_PROMPT_TEMPLATE;
+    }
     await this.systemPromptWriteQueue.catch(() => undefined);
     const path = this.normalizeSystemPath(SYSTEM_PROMPT_PATH, false);
-    const file = this.app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof TFile)) {
-      await this.writeSystemPrompt(this.systemPromptTemplate || DEFAULT_SYSTEM_PROMPT_TEMPLATE);
-      return this.systemPromptTemplate;
+    try {
+      const content = await this.readSystemPromptFile(path);
+      if (content == null) {
+        await this.writeSystemPrompt(this.systemPromptTemplate || DEFAULT_SYSTEM_PROMPT_TEMPLATE);
+      } else {
+        this.systemPromptTemplate = content;
+      }
+    } catch (_error) {
+      return this.systemPromptTemplate || DEFAULT_SYSTEM_PROMPT_TEMPLATE;
     }
-    this.systemPromptTemplate = await this.app.vault.cachedRead(file);
     return this.systemPromptTemplate;
   }
 
@@ -2086,19 +2138,36 @@ module.exports = class VaultAgentPlugin extends Plugin {
         const path = this.normalizeSystemPath(SYSTEM_PROMPT_PATH, false);
         const parent = path.slice(0, path.lastIndexOf("/"));
         if (parent) await this.ensureFolder(parent, true);
-        const existing = this.app.vault.getAbstractFileByPath(path);
-        if (existing instanceof TFile) {
-          await this.app.vault.process(existing, () => content);
-        } else if (existing) {
+        const state = await this.systemPromptFileState(path);
+        if (state.type === "file" && state.file) {
+          await this.app.vault.process(state.file, () => content);
+        } else if (state.type === "file" && typeof this.app.vault.adapter?.write === "function") {
+          await this.app.vault.adapter.write(path, content);
+        } else if (state.type !== "missing") {
           throw new Error(`${path} 已存在且不是文件`);
         } else {
-          await this.app.vault.create(path, content);
+          try {
+            await this.app.vault.create(path, content);
+          } catch (error) {
+            const racedState = await this.systemPromptFileState(path);
+            if (racedState.type === "file" && racedState.file) {
+              await this.app.vault.process(racedState.file, () => content);
+            } else if (
+              racedState.type === "file" &&
+              typeof this.app.vault.adapter?.write === "function"
+            ) {
+              await this.app.vault.adapter.write(path, content);
+            } else {
+              throw error;
+            }
+          }
         }
       });
     return this.systemPromptWriteQueue;
   }
 
   async openSystemPrompt() {
+    await this.ensureSystemPromptReady();
     await this.systemPromptWriteQueue.catch(() => undefined);
     const path = this.normalizeSystemPath(SYSTEM_PROMPT_PATH, false);
     const file = this.app.vault.getAbstractFileByPath(path);
