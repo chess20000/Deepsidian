@@ -2127,6 +2127,23 @@ module.exports = class VaultAgentPlugin extends Plugin {
     return leaf?.view?.getViewType?.() === VIEW_TYPE;
   }
 
+  findMobileReturnLeaf(activeLeaf) {
+    if (
+      this.mobileReturnLeaf &&
+      this.mobileReturnLeaf !== activeLeaf &&
+      !this.isDeepsidianLeaf(this.mobileReturnLeaf)
+    ) {
+      return this.mobileReturnLeaf;
+    }
+    let fallback = null;
+    this.app.workspace.iterateAllLeaves?.((leaf) => {
+      if (!fallback && leaf !== activeLeaf && !this.isDeepsidianLeaf(leaf)) {
+        fallback = leaf;
+      }
+    });
+    return fallback;
+  }
+
   async toggleMobileView() {
     const activeLeaf = this.getActiveWorkspaceLeaf();
     if (!this.isDeepsidianLeaf(activeLeaf)) {
@@ -2134,14 +2151,21 @@ module.exports = class VaultAgentPlugin extends Plugin {
       return;
     }
 
-    const returnLeaf = this.mobileReturnLeaf;
+    const returnLeaf = this.findMobileReturnLeaf(activeLeaf);
     this.mobileReturnLeaf = null;
-    this.app.workspace.detachLeavesOfType(VIEW_TYPE);
+    let revealed = false;
     if (returnLeaf && returnLeaf !== activeLeaf) {
       try {
         await this.app.workspace.revealLeaf(returnLeaf);
+        revealed = true;
       } catch (_error) {
-        // Obsidian will reveal the remaining mobile leaf when the saved leaf no longer exists.
+        // Fall through to a fresh empty tab when the saved leaf no longer exists.
+      }
+    }
+    if (!revealed) {
+      const fallback = this.app.workspace.getLeaf("tab");
+      if (fallback && fallback !== activeLeaf) {
+        await this.app.workspace.revealLeaf(fallback);
       }
     }
     this.updateMobileFabVisibility();
@@ -2154,9 +2178,13 @@ module.exports = class VaultAgentPlugin extends Plugin {
       if (activeLeaf && !this.isDeepsidianLeaf(activeLeaf)) {
         this.mobileReturnLeaf = activeLeaf;
       }
-      this.app.workspace.detachLeavesOfType(VIEW_TYPE);
-      leaf = this.app.workspace.getLeaf("tab");
-      await leaf.setViewState({ type: VIEW_TYPE, active: true });
+      const deepsidianLeaves = this.app.workspace.getLeavesOfType(VIEW_TYPE);
+      leaf = deepsidianLeaves.find((candidate) => candidate.view?.plugin === this);
+      if (!leaf) {
+        for (const staleLeaf of deepsidianLeaves) staleLeaf.detach?.();
+        leaf = this.app.workspace.getLeaf("tab");
+        await leaf.setViewState({ type: VIEW_TYPE, active: true });
+      }
     } else {
       leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0];
       if (!leaf) {
