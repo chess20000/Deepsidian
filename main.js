@@ -200,7 +200,7 @@ function readableWebContent(value, contentType) {
   return { title, text };
 }
 
-function stripThinkBlocks(value) {
+function splitThinkBlocks(value) {
   const text = String(value ?? "");
   const tags = /<think\b[^>]*>|<\/think\s*>/gi;
   const openings = [];
@@ -216,7 +216,7 @@ function stripThinkBlocks(value) {
     ranges.push([openings.pop(), tags.lastIndex]);
   }
 
-  if (ranges.length === 0) return text;
+  if (ranges.length === 0) return { visible: text, reasoning: "" };
   ranges.sort((left, right) => left[0] - right[0]);
   const merged = [];
   for (const range of ranges) {
@@ -230,11 +230,24 @@ function stripThinkBlocks(value) {
 
   let visible = "";
   let cursor = 0;
+  const reasoning = [];
   for (const [start, end] of merged) {
     visible += text.slice(cursor, start);
+    const thought = text
+      .slice(start, end)
+      .replace(/<think\b[^>]*>|<\/think\s*>/gi, "")
+      .trim();
+    if (thought) reasoning.push(thought);
     cursor = end;
   }
-  return visible + text.slice(cursor);
+  return {
+    visible: visible + text.slice(cursor),
+    reasoning: reasoning.join("\n\n"),
+  };
+}
+
+function stripThinkBlocks(value) {
+  return splitThinkBlocks(value).visible;
 }
 
 function stripInternalLogBlocks(value) {
@@ -964,13 +977,19 @@ class AgentClient {
         }
       }
       const toolCalls = Array.isArray(assistant.tool_calls) ? assistant.tool_calls : [];
-      const reasoning = String(assistant.reasoning_content || "").trim();
+      const parsedContent = splitThinkBlocks(assistant.content);
+      const reasoning = [
+        String(assistant.reasoning_content || "").trim(),
+        parsedContent.reasoning,
+      ]
+        .filter((part, index, parts) => part && parts.indexOf(part) === index)
+        .join("\n\n");
       if (reasoning) {
         reasoningParts.push(reasoning);
         if (onEvent) await onEvent({ type: "reasoning", text: reasoning });
       }
 
-      const answerPart = stripThinkBlocks(assistant.content).trim();
+      const answerPart = parsedContent.visible.trim();
       if (toolCalls.length === 0) {
         return {
           content: answerPart || "模型没有返回文字内容。",
@@ -1168,13 +1187,6 @@ class VaultAgentView extends ItemView {
 
     const main = this.workbenchEl.createEl("main", { cls: "vault-agent-main" });
     const header = main.createDiv({ cls: "vault-agent-header" });
-    const mobileHistory = this.createIconButton(
-      header,
-      "menu",
-      "打开对话历史",
-      "vault-agent-mobile-history-toggle",
-    );
-    mobileHistory.addEventListener("click", () => this.toggleHistory());
     const mobileNewChat = this.createIconButton(
       header,
       "plus",
@@ -1182,6 +1194,13 @@ class VaultAgentView extends ItemView {
       "vault-agent-mobile-new-chat",
     );
     mobileNewChat.addEventListener("click", () => this.startNewChat());
+    const mobileHistory = this.createIconButton(
+      header,
+      "menu",
+      "打开对话历史",
+      "vault-agent-mobile-history-toggle",
+    );
+    mobileHistory.addEventListener("click", () => this.toggleHistory());
     const titleGroup = header.createDiv({ cls: "vault-agent-title-group" });
     this.sessionTitleEl = titleGroup.createDiv({ text: "新对话", cls: "vault-agent-session-title" });
     const statusLine = titleGroup.createDiv({ cls: "vault-agent-status-line" });

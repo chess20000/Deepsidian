@@ -288,8 +288,12 @@
   order: 2;
 }
 
-.vault-agent-mobile-history-toggle {
+.vault-agent-mobile-new-chat {
   margin-left: auto;
+}
+
+.vault-agent-mobile-history-toggle {
+  margin-left: 6px;
 }
 
 .vault-agent-title-group {
