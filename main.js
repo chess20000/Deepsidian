@@ -35,6 +35,7 @@ const DEFAULT_SETTINGS = {
   thinkingEnabled: false,
   allowedFolder: "",
   chatFolder: "deepsidian/Chats",
+  lastSessionPath: "",
   confirmWrites: true,
   contextLimit: 1048576,
   maxToolRounds: 8,
@@ -456,6 +457,95 @@ class PassphraseModal extends Modal {
       if (event.key === "Enter") submitValue();
     });
     window.setTimeout(() => password.focus(), 0);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+    if (!this.resolved) {
+      this.resolved = true;
+      if (this.resolve) this.resolve(null);
+    }
+  }
+}
+
+class FolderAccessModal extends Modal {
+  constructor(app, currentPath = "") {
+    super(app);
+    this.currentPath = String(currentPath || "");
+    this.resolved = false;
+    this.resolve = null;
+  }
+
+  ask() {
+    return new Promise((resolve) => {
+      this.resolve = resolve;
+      this.open();
+    });
+  }
+
+  finish(path) {
+    if (this.resolved) return;
+    this.resolved = true;
+    if (this.resolve) this.resolve({ path: String(path || "") });
+    this.close();
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("vault-agent-folder-modal");
+    contentEl.createEl("h3", { text: "选择 Agent 可访问目录" });
+    contentEl.createEl("p", {
+      text: "Agent 只能访问所选目录及其子目录。选择整个 Vault 可关闭受限访问。",
+      cls: "vault-agent-muted",
+    });
+    const search = contentEl.createEl("input", {
+      cls: "vault-agent-folder-search",
+      attr: { type: "search", placeholder: "搜索文件夹…", "aria-label": "搜索文件夹" },
+    });
+    const list = contentEl.createDiv({ cls: "vault-agent-folder-list" });
+    const configDir = normalizePath(this.app.vault.configDir || ".obsidian");
+    const loaded = typeof this.app.vault.getAllFolders === "function"
+      ? this.app.vault.getAllFolders()
+      : this.app.vault.getAllLoadedFiles();
+    const folders = loaded
+      .filter((entry) => entry instanceof TFolder && entry.path)
+      .map((entry) => entry.path)
+      .filter((path) =>
+        path !== configDir &&
+        !path.startsWith(`${configDir}/`) &&
+        path !== SYNCED_KEY_FOLDER &&
+        !path.startsWith(`${SYNCED_KEY_FOLDER}/`))
+      .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }));
+
+    const createChoice = (path, label, icon) => {
+      const button = list.createEl("button", {
+        cls: "vault-agent-folder-choice",
+        attr: { type: "button", title: label },
+      });
+      button.toggleClass("is-active", path === this.currentPath);
+      const iconEl = button.createSpan({ cls: "vault-agent-folder-choice-icon" });
+      setIcon(iconEl, icon);
+      button.createSpan({ text: label, cls: "vault-agent-folder-choice-label" });
+      button.addEventListener("click", () => this.finish(path));
+    };
+
+    const render = () => {
+      const query = search.value.trim().toLocaleLowerCase();
+      list.empty();
+      if (!query || "整个 vault".includes(query)) {
+        createChoice("", "整个 Vault（关闭受限访问）", "folder-open");
+      }
+      const visible = folders.filter((path) => path.toLocaleLowerCase().includes(query));
+      for (const path of visible) createChoice(path, path, "folder");
+      if (list.childElementCount === 0) {
+        list.createDiv({ text: "没有匹配的文件夹", cls: "vault-agent-folder-empty" });
+      }
+    };
+
+    search.addEventListener("input", render);
+    render();
+    window.setTimeout(() => search.focus(), 0);
   }
 
   onClose() {
@@ -910,6 +1000,7 @@ class VaultAgentView extends ItemView {
     this.sendButton = null;
     this.thinkingButton = null;
     this.thinkingLabel = null;
+    this.accessButton = null;
     this.contextMeterEl = null;
     this.contextMeterValueEl = null;
     this.contextUsage = {
@@ -979,6 +1070,13 @@ class VaultAgentView extends ItemView {
       "vault-agent-mobile-history-toggle",
     );
     mobileHistory.addEventListener("click", () => this.toggleHistory());
+    const mobileNewChat = this.createIconButton(
+      header,
+      "plus",
+      "新对话",
+      "vault-agent-mobile-new-chat",
+    );
+    mobileNewChat.addEventListener("click", () => this.startNewChat());
     const titleGroup = header.createDiv({ cls: "vault-agent-title-group" });
     this.sessionTitleEl = titleGroup.createDiv({ text: "新对话", cls: "vault-agent-session-title" });
     const statusLine = titleGroup.createDiv({ cls: "vault-agent-status-line" });
@@ -1022,6 +1120,15 @@ class VaultAgentView extends ItemView {
       cls: "vault-agent-context-meter-value",
     });
     this.renderContextUsage(null, this.plugin.settings.contextLimit, "next");
+    this.accessButton = this.createIconButton(
+      actionRight,
+      "folder",
+      "选择 Agent 可访问目录",
+      "vault-agent-access-toggle",
+    );
+    this.accessButton.addEventListener("click", () => this.chooseAllowedFolder());
+    this.accessButton.addEventListener("pointerdown", (event) => event.preventDefault());
+    this.updateAccessButton();
     this.thinkingButton = actionRight.createEl("button", {
       cls: "vault-agent-thinking-toggle",
       attr: { type: "button", "aria-label": "切换思考模式" },
@@ -1046,7 +1153,8 @@ class VaultAgentView extends ItemView {
     this.sendButton.addEventListener("click", () => this.submit());
     this.resizeInput();
     this.installViewportTracking();
-    await this.refreshHistorySidebar();
+    const sessions = await this.refreshHistorySidebar();
+    await this.restoreLastSession(sessions);
   }
 
   createIconButton(parent, icon, label, cls = "") {
@@ -1066,12 +1174,12 @@ class VaultAgentView extends ItemView {
   }
 
   async refreshHistorySidebar() {
-    if (!this.historyListEl) return;
+    if (!this.historyListEl) return [];
     const sessions = await this.logManager.listSessions().catch(() => []);
     this.historyListEl.empty();
     if (sessions.length === 0) {
       this.historyListEl.createDiv({ text: "暂无对话", cls: "vault-agent-history-empty" });
-      return;
+      return sessions;
     }
     for (const session of sessions) {
       const item = this.historyListEl.createEl("button", {
@@ -1083,9 +1191,20 @@ class VaultAgentView extends ItemView {
       item.createDiv({ text: session.preview, cls: "vault-agent-history-item-preview" });
       item.addEventListener("click", () => this.selectSession(session));
     }
+    return sessions;
   }
 
-  async selectSession(session) {
+  async restoreLastSession(sessions) {
+    if (this.plugin.lastSessionPath === null || !Array.isArray(sessions) || sessions.length === 0) {
+      return;
+    }
+    const preferred = sessions.find((session) => session.path === this.plugin.lastSessionPath);
+    await this.selectSession(preferred || sessions[0], {
+      collapseHistory: false,
+    });
+  }
+
+  async selectSession(session, options = {}) {
     if (this.busy) return new Notice("请等待当前任务结束");
     try {
       this.history = await this.logManager.loadSession(session.path);
@@ -1096,8 +1215,9 @@ class VaultAgentView extends ItemView {
         await this.renderMessage(message.role, message.content);
       }
       this.sessionTitleEl?.setText(session.title);
-      this.toggleHistory(true);
-      await this.refreshHistorySidebar();
+      await this.plugin.rememberLastSession(session.path);
+      if (options.collapseHistory !== false) this.toggleHistory(true);
+      if (options.refreshSidebar !== false) await this.refreshHistorySidebar();
     } catch (error) {
       new Notice(`无法打开对话：${errorMessage(error)}`);
     }
@@ -1185,6 +1305,7 @@ class VaultAgentView extends ItemView {
     }
     this.history = [];
     this.logManager.newSession();
+    await this.plugin.rememberLastSession(null);
     this.renderContextUsage(null, this.plugin.settings.contextLimit, "next");
     if (this.messagesEl) {
       this.messagesEl.empty();
@@ -1193,6 +1314,37 @@ class VaultAgentView extends ItemView {
     this.sessionTitleEl?.setText("新对话");
     await this.refreshHistorySidebar();
     if (this.inputEl) this.inputEl.focus();
+  }
+
+  async chooseAllowedFolder() {
+    if (this.busy) {
+      new Notice("请等待当前任务结束后再切换访问目录");
+      return;
+    }
+    const choice = await new FolderAccessModal(
+      this.app,
+      this.plugin.settings.allowedFolder,
+    ).ask();
+    if (!choice) return;
+    this.plugin.settings.allowedFolder = choice.path;
+    await this.plugin.saveSettings();
+    this.updateAccessButton();
+    new Notice(
+      choice.path
+        ? `Agent 受限访问：${choice.path}`
+        : "Agent 可访问整个 Vault（敏感目录仍受保护）",
+    );
+  }
+
+  updateAccessButton() {
+    if (!this.accessButton) return;
+    const folder = this.plugin.settings.allowedFolder.trim();
+    const active = Boolean(folder);
+    const label = active ? `受限访问：${folder}` : "选择 Agent 可访问目录";
+    this.accessButton.toggleClass("is-active", active);
+    this.accessButton.setAttribute("aria-pressed", String(active));
+    this.accessButton.setAttribute("aria-label", label);
+    this.accessButton.setAttribute("title", label);
   }
 
   async renderMessage(role, content, meta = {}) {
@@ -1479,6 +1631,7 @@ class VaultAgentView extends ItemView {
     let runFinished = false;
     try {
       await this.logManager.appendMessage("user", content);
+      await this.plugin.rememberLastSession(this.logManager.path);
       const answer = await this.plugin.agentClient.run(this.history, async (event) => {
         const name = event.call?.function?.name || "unknown";
         if (event.type === "assistant-content") {
@@ -1650,7 +1803,7 @@ class VaultAgentSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Agent 可访问目录")
-      .setDesc("留空表示整个 Vault；填写后，Agent 只能读取和修改该目录。")
+      .setDesc("留空表示整个 Vault；填写后，搜索、读取和写入都只能访问该目录及其子目录。")
       .addText((text) =>
         text
           .setPlaceholder("例如 Projects")
@@ -1714,6 +1867,7 @@ module.exports = class VaultAgentPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
     this.mobileReturnLeaf = null;
+    this.lastSessionPath = this.settings.lastSessionPath || undefined;
     this.toolRegistry = new ToolRegistry(this);
     this.agentClient = new AgentClient(this);
     this.registerBuiltinTools();
@@ -1766,10 +1920,17 @@ module.exports = class VaultAgentPlugin extends Plugin {
     );
     delete this.settings.maxReadChars;
     this.settings.maxSearchResults = clamp(Number(this.settings.maxSearchResults) || 12, 1, 50);
+    this.settings.lastSessionPath = String(this.settings.lastSessionPath || "");
   }
 
   async saveSettings() {
     await this.saveData({ settings: this.settings });
+  }
+
+  async rememberLastSession(path) {
+    this.lastSessionPath = path == null ? null : String(path);
+    this.settings.lastSessionPath = this.lastSessionPath || "";
+    await this.saveSettings();
   }
 
   getApiKey() {
