@@ -1,7 +1,7 @@
 {
   "id": "vault-agent-chat",
   "name": "deepsidian",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "minAppVersion": "1.11.4",
   "description": "A mobile-friendly BYOK AI agent that can chat with and safely edit your vault.",
   "author": "Lan Wangqiu",
