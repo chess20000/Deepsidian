@@ -26,6 +26,9 @@ const PBKDF2_ITERATIONS = 310000;
 const MAX_WRITE_CHARS = 200000;
 const MAX_TOOL_OUTPUT_CHARS = 50000;
 const MAX_READ_LINES_PER_CALL = 500;
+const MAX_WEB_FETCH_BYTES = 2 * 1024 * 1024;
+const MAX_WEB_FETCH_CHARS = 30000;
+const WEB_FETCH_TIMEOUT_MS = 20000;
 const INTERNAL_LOG_BLOCK_PATTERN =
   /<!-- deepsidian-internal:(reasoning|tool):start -->[\s\S]*?<!-- deepsidian-internal:\1:end -->/gi;
 
@@ -108,6 +111,93 @@ function truncate(value, limit) {
   const text = String(value ?? "");
   if (text.length <= limit) return text;
   return `${text.slice(0, limit)}\n…（已截断 ${text.length - limit} 个字符）`;
+}
+
+function normalizeWebUrl(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) throw new Error("URL 不能为空");
+  if (raw.length > 2048) throw new Error("URL 过长");
+
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch (_error) {
+    throw new Error("URL 格式无效");
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error("只允许 HTTP 或 HTTPS URL");
+  }
+  if (parsed.username || parsed.password) throw new Error("URL 不能包含用户名或密码");
+  if (parsed.port) throw new Error("不允许访问非常规端口");
+
+  const host = parsed.hostname.toLocaleLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (
+    !host ||
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local") ||
+    host.endsWith(".internal") ||
+    host.endsWith(".lan") ||
+    host.endsWith(".home") ||
+    host.endsWith(".home.arpa")
+  ) {
+    throw new Error("禁止访问本机或内部网络地址");
+  }
+  if (host.includes(":")) throw new Error("禁止访问 IP 地址形式的 IPv6 主机");
+
+  const ipv4Match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4Match) {
+    const octets = ipv4Match.slice(1).map(Number);
+    if (octets.some((part) => part > 255)) throw new Error("IP 地址无效");
+    const [first, second] = octets;
+    const blocked =
+      first === 0 ||
+      first === 10 ||
+      first === 127 ||
+      first >= 224 ||
+      (first === 100 && second >= 64 && second <= 127) ||
+      (first === 169 && second === 254) ||
+      (first === 172 && second >= 16 && second <= 31) ||
+      (first === 192 && second === 168) ||
+      (first === 198 && (second === 18 || second === 19));
+    if (blocked) throw new Error("禁止访问本机、私网或保留 IP 地址");
+  }
+
+  parsed.hash = "";
+  return parsed.toString();
+}
+
+function responseHeader(headers, name) {
+  const target = String(name).toLocaleLowerCase();
+  for (const [key, value] of Object.entries(headers || {})) {
+    if (key.toLocaleLowerCase() === target) return String(value || "");
+  }
+  return "";
+}
+
+function readableWebContent(value, contentType) {
+  const source = String(value ?? "");
+  const isHtml = /text\/html|application\/xhtml\+xml/i.test(contentType) ||
+    /^\s*(?:<!doctype\s+html|<html\b)/i.test(source);
+  if (!isHtml || typeof DOMParser === "undefined") {
+    return { title: "", text: source.trim() };
+  }
+
+  const document = new DOMParser().parseFromString(source, "text/html");
+  for (const node of document.querySelectorAll(
+    "script, style, noscript, template, svg, canvas, iframe, nav, footer, form",
+  )) {
+    node.remove();
+  }
+  const title = document.querySelector("title")?.textContent?.trim() || "";
+  const root = document.querySelector("main, article, [role='main']") || document.body;
+  const text = String(root?.innerText || root?.textContent || "")
+    .replace(/\u00a0/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return { title, text };
 }
 
 function stripThinkBlocks(value) {
@@ -2372,6 +2462,97 @@ module.exports = class VaultAgentPlugin extends Plugin {
       properties,
       required,
       additionalProperties: false,
+    });
+
+    this.registerAgentTool({
+      risk: "read",
+      truncateOutput: false,
+      definition: {
+        type: "function",
+        function: {
+          name: "web_fetch",
+          description:
+            "抓取一个公开 HTTP/HTTPS 网页并返回可读正文。不会执行网页脚本；不支持本机、私网地址或非常规端口。",
+          parameters: objectSchema(
+            {
+              url: { type: "string", description: "要抓取的完整 HTTP 或 HTTPS URL" },
+              max_characters: {
+                type: "integer",
+                minimum: 1000,
+                maximum: MAX_WEB_FETCH_CHARS,
+                description: `最多返回的正文字符数，默认 ${MAX_WEB_FETCH_CHARS}`,
+              },
+            },
+            ["url"],
+          ),
+        },
+      },
+      execute: async (args) => {
+        const url = normalizeWebUrl(args.url);
+        const requestedLimit = args.max_characters == null
+          ? MAX_WEB_FETCH_CHARS
+          : Number(args.max_characters);
+        if (
+          !Number.isInteger(requestedLimit) ||
+          requestedLimit < 1000 ||
+          requestedLimit > MAX_WEB_FETCH_CHARS
+        ) {
+          throw new Error(`max_characters 必须是 1000 到 ${MAX_WEB_FETCH_CHARS} 的整数`);
+        }
+
+        let timeoutId;
+        let response;
+        try {
+          response = await Promise.race([
+            requestUrl({
+              url,
+              method: "GET",
+              headers: {
+                Accept: "text/html, text/plain, application/json, application/xml;q=0.9, */*;q=0.1",
+              },
+              throw: false,
+            }),
+            new Promise((resolve, reject) => {
+              timeoutId = globalThis.setTimeout(
+                () => reject(new Error(`网页请求超过 ${WEB_FETCH_TIMEOUT_MS / 1000} 秒`)),
+                WEB_FETCH_TIMEOUT_MS,
+              );
+            }),
+          ]);
+        } finally {
+          if (timeoutId != null) globalThis.clearTimeout(timeoutId);
+        }
+        if (response.status < 200 || response.status >= 300) {
+          throw new Error(`网页返回 HTTP ${response.status}`);
+        }
+        const byteLength = response.arrayBuffer?.byteLength || 0;
+        if (byteLength > MAX_WEB_FETCH_BYTES) {
+          throw new Error(`网页响应超过 ${MAX_WEB_FETCH_BYTES} 字节限制`);
+        }
+
+        const contentType = responseHeader(response.headers, "content-type");
+        const mimeType = contentType.split(";", 1)[0].trim().toLocaleLowerCase();
+        if (
+          mimeType &&
+          !mimeType.startsWith("text/") &&
+          !mimeType.includes("json") &&
+          !mimeType.includes("xml")
+        ) {
+          throw new Error(`不支持的网页内容类型：${mimeType}`);
+        }
+        const readable = readableWebContent(response.text, contentType);
+        if (!readable.text) throw new Error("网页没有可读取的文本内容");
+        const totalCharacters = readable.text.length;
+        return {
+          url,
+          status: response.status,
+          contentType,
+          title: readable.title,
+          totalCharacters,
+          truncated: totalCharacters > requestedLimit,
+          content: readable.text.slice(0, requestedLimit),
+        };
+      },
     });
 
     this.registerAgentTool({
