@@ -107,6 +107,22 @@ function safeJson(value) {
   }
 }
 
+function modelServiceErrorDetail(data, fallback = "未知错误") {
+  const error = data?.error;
+  if (typeof error === "string" && error.trim()) return error.trim();
+  if (typeof error?.message === "string" && error.message.trim()) return error.message.trim();
+  if (error && typeof error === "object") return truncate(safeJson(error), 1000);
+  return truncate(String(fallback || "未知错误"), 1000);
+}
+
+function isIcedgeProvider(value) {
+  try {
+    return new URL(String(value || "").trim()).hostname.toLocaleLowerCase() === "api.icedge.top";
+  } catch (_error) {
+    return false;
+  }
+}
+
 function truncate(value, limit) {
   const text = String(value ?? "");
   if (text.length <= limit) return text;
@@ -1047,6 +1063,8 @@ class AgentClient {
     const base = this.plugin.settings.baseUrl.trim().replace(/\/+$/, "");
     if (!base) throw new Error("请先设置 API Base URL");
     if (/\/chat\/completions$/i.test(base)) return base;
+    if (/\/v1$/i.test(base)) return `${base}/chat/completions`;
+    if (isIcedgeProvider(base)) return `${base}/v1/chat/completions`;
     return `${base}/chat/completions`;
   }
 
@@ -1067,6 +1085,8 @@ class AgentClient {
         type: this.plugin.settings.thinkingEnabled ? "enabled" : "disabled",
       };
       if (this.plugin.settings.thinkingEnabled) payload.reasoning_effort = "high";
+    } else if (isIcedgeProvider(this.plugin.settings.baseUrl)) {
+      payload.reasoning_effort = this.plugin.settings.thinkingEnabled ? "high" : "none";
     }
 
     let response;
@@ -1098,8 +1118,11 @@ class AgentClient {
       throw new Error("无法连接模型服务：请求未得到响应");
     }
     if (response.status < 200 || response.status >= 300) {
-      const detail = data?.error?.message || truncate(response.text || "未知错误", 1000);
+      const detail = modelServiceErrorDetail(data, response.text);
       throw new Error(`模型服务返回 ${response.status}：${detail}`);
+    }
+    if (data?.error && !data?.choices?.length) {
+      throw new Error(`模型服务错误：${modelServiceErrorDetail(data, response.text)}`);
     }
 
     const message = data?.choices?.[0]?.message;
@@ -2418,6 +2441,8 @@ module.exports = class VaultAgentPlugin extends Plugin {
     if (/deepseek/i.test(this.settings.baseUrl)) {
       payload.thinking = { type: this.settings.thinkingEnabled ? "enabled" : "disabled" };
       if (this.settings.thinkingEnabled) payload.reasoning_effort = "high";
+    } else if (isIcedgeProvider(this.settings.baseUrl)) {
+      payload.reasoning_effort = this.settings.thinkingEnabled ? "high" : "none";
     }
     const response = await requestUrl({
       url: endpoint,
@@ -2430,8 +2455,11 @@ module.exports = class VaultAgentPlugin extends Plugin {
       throw: false,
     });
     if (response.status < 200 || response.status >= 300) {
-      const detail = response.json?.error?.message || truncate(response.text || "未知错误", 500);
+      const detail = modelServiceErrorDetail(response.json, response.text);
       throw new Error(`${response.status} ${detail}`);
+    }
+    if (response.json?.error && !response.json?.choices?.length) {
+      throw new Error(modelServiceErrorDetail(response.json, response.text));
     }
     if (!response.json?.choices?.[0]?.message) throw new Error("响应格式不正确");
   }
