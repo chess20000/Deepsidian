@@ -2422,7 +2422,18 @@ module.exports = class VaultAgentPlugin extends Plugin {
       current = current ? `${current}/${part}` : part;
       const existing = this.app.vault.getAbstractFileByPath(current);
       if (!existing) {
-        await this.app.vault.createFolder(current);
+        try {
+          await this.app.vault.createFolder(current);
+        } catch (error) {
+          const indexed = this.app.vault.getAbstractFileByPath(current);
+          let stat = null;
+          try {
+            stat = await this.app.vault.adapter?.stat?.(current);
+          } catch (_statError) {
+            // Preserve the original create error when the adapter cannot confirm the folder.
+          }
+          if (!(indexed instanceof TFolder) && stat?.type !== "folder") throw error;
+        }
       } else if (!(existing instanceof TFolder)) {
         throw new Error(`路径中的目录实际是文件：${current}`);
       }
